@@ -272,7 +272,7 @@ class TestDeepgramSTTIntegrationSetup:
     @pytest.mark.asyncio
     async def test_platform_setup_entry(self, mock_hass, mock_config_entry):
         """Test STT platform setup from config entry."""
-        mock_add_entities = AsyncMock()
+        mock_add_entities = MagicMock()
 
         await async_setup_platform_entry(mock_hass, mock_config_entry, mock_add_entities)
 

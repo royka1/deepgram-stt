@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import Any
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
+import deepgram.extensions.types.sockets as deepgram_socket_types
 from deepgram.extensions.types.sockets import ListenV1ControlMessage
+from deepgram.listen.v1 import raw_client as deepgram_listen_raw_client
 
 from homeassistant.components.stt import (
     AudioBitRates,
@@ -24,6 +27,7 @@ from homeassistant.components.stt import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util.ssl import client_context
 
 from .const import (
     CONF_API_KEY,
@@ -40,22 +44,58 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _prepare_client(api_key: str) -> AsyncDeepgramClient:
+    """Create the Deepgram client, doing all blocking work off the event loop.
+
+    The SDK loads SSL certificates when the client is created and again when a
+    websocket connects, and lazily imports its message-type modules on first
+    use. All of that blocks, so this function must run in an executor.
+    """
+    # Materialize the package's lazy attributes so its module __getattr__
+    # (which calls import_module) never runs in the event loop
+    for name in deepgram_socket_types.__all__:
+        setattr(deepgram_socket_types, name, getattr(deepgram_socket_types, name))
+
+    # The SDK offers no way to pass an SSL context to its websocket connect, so
+    # it would build a new one (loading CA certs) inside the event loop on every
+    # connection. Wrap connect to inject Home Assistant's cached context.
+    if not getattr(deepgram_listen_raw_client.websockets_client_connect, "_ha_ssl_patched", False):
+        ssl_context = client_context()
+        original_connect = deepgram_listen_raw_client.websockets_client_connect
+
+        def _connect_with_preloaded_ssl(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("ssl", ssl_context)
+            return original_connect(*args, **kwargs)
+
+        _connect_with_preloaded_ssl._ha_ssl_patched = True  # noqa: SLF001
+        deepgram_listen_raw_client.websockets_client_connect = _connect_with_preloaded_ssl
+
+    client = AsyncDeepgramClient(api_key=api_key)
+    # First access lazily imports the listen client modules and caches the
+    # result on the instance; trigger that here instead of at connect time
+    _ = client.listen.v1
+    return client
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Deepgram STT from config entry."""
-    async_add_entities([DeepgramSTTEntity(config_entry)])
+    api_key = config_entry.data.get(CONF_API_KEY)
+    client = await hass.async_add_executor_job(_prepare_client, api_key) if api_key else None
+    async_add_entities([DeepgramSTTEntity(config_entry, client)])
 
 
 class DeepgramSTTEntity(SpeechToTextEntity):
     """Deepgram Speech-to-Text entity."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
+    def __init__(self, config_entry: ConfigEntry, client: AsyncDeepgramClient | None = None) -> None:
         """Initialize Deepgram STT."""
         self._attr_name = "Deepgram STT"
         self._attr_unique_id = "deepgram_stt"
+        self._client = client
         self._api_key = config_entry.data.get(CONF_API_KEY)
         self._model = config_entry.data.get(CONF_MODEL, DEFAULT_MODEL)
         self._language = config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
@@ -114,8 +154,9 @@ class DeepgramSTTEntity(SpeechToTextEntity):
             return SpeechResult("", SpeechResultState.ERROR)
 
         try:
-            # Configure Deepgram client
-            client = AsyncDeepgramClient(api_key=self._api_key)
+            # The client is normally created in an executor during setup;
+            # creating it here would block the event loop loading SSL certs.
+            client = self._client if self._client is not None else AsyncDeepgramClient(api_key=self._api_key)
 
             # Storage for transcript
             transcript_parts = []
