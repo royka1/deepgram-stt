@@ -11,6 +11,8 @@ DEFAULT_SAMPLE_RATE = 16000
 # Streaming Configuration
 STREAM_DELAY = 0.01
 TRANSCRIPT_TIMEOUT = 5
+# Deepgram closes the socket (NET-0001) after ~10s without audio or a message
+KEEPALIVE_INTERVAL = 5
 
 # Config Keys
 CONF_API_KEY = "api_key"

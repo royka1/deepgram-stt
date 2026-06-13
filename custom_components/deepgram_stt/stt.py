@@ -11,7 +11,7 @@ from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
 import deepgram.extensions.types.sockets as deepgram_socket_types
 from deepgram.extensions.types.sockets import ListenV1ControlMessage
-from deepgram.listen.v1 import raw_client as deepgram_listen_raw_client
+from deepgram.listen.v1 import client as deepgram_listen_client, raw_client as deepgram_listen_raw_client
 
 from homeassistant.components.stt import (
     AudioBitRates,
@@ -37,11 +37,23 @@ from .const import (
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DEFAULT_SAMPLE_RATE,
+    KEEPALIVE_INTERVAL,
     STREAM_DELAY,
     TRANSCRIPT_TIMEOUT,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _wrap_connect_with_ssl(original_connect: Any, ssl_context: Any) -> Any:
+    """Wrap a websockets connect callable to default to a pre-built SSL context."""
+
+    def _connect_with_preloaded_ssl(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("ssl", ssl_context)
+        return original_connect(*args, **kwargs)
+
+    _connect_with_preloaded_ssl._ha_ssl_patched = True  # noqa: SLF001
+    return _connect_with_preloaded_ssl
 
 
 def _prepare_client(api_key: str) -> AsyncDeepgramClient:
@@ -58,17 +70,15 @@ def _prepare_client(api_key: str) -> AsyncDeepgramClient:
 
     # The SDK offers no way to pass an SSL context to its websocket connect, so
     # it would build a new one (loading CA certs) inside the event loop on every
-    # connection. Wrap connect to inject Home Assistant's cached context.
-    if not getattr(deepgram_listen_raw_client.websockets_client_connect, "_ha_ssl_patched", False):
-        ssl_context = client_context()
-        original_connect = deepgram_listen_raw_client.websockets_client_connect
-
-        def _connect_with_preloaded_ssl(*args: Any, **kwargs: Any) -> Any:
-            kwargs.setdefault("ssl", ssl_context)
-            return original_connect(*args, **kwargs)
-
-        _connect_with_preloaded_ssl._ha_ssl_patched = True  # noqa: SLF001
-        deepgram_listen_raw_client.websockets_client_connect = _connect_with_preloaded_ssl
+    # connection. Both the listen client and its raw client hold their own
+    # binding of websockets' connect; wrap each to inject Home Assistant's
+    # cached context. AsyncV1Client.connect uses the binding in client.py.
+    ssl_context = client_context()
+    for ws_module in (deepgram_listen_client, deepgram_listen_raw_client):
+        if not getattr(ws_module.websockets_client_connect, "_ha_ssl_patched", False):
+            ws_module.websockets_client_connect = _wrap_connect_with_ssl(
+                ws_module.websockets_client_connect, ssl_context
+            )
 
     client = AsyncDeepgramClient(api_key=api_key)
     # First access lazily imports the listen client modules and caches the
@@ -172,7 +182,8 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                 _LOGGER.debug("Received message from Deepgram: type=%s", type(message).__name__)
 
                 if not hasattr(message, "channel"):
-                    _LOGGER.warning("Message missing 'channel' attribute: %s", dir(message))
+                    # Non-transcript events such as Metadata or SpeechStarted
+                    _LOGGER.debug("Ignoring %s event from Deepgram", getattr(message, "type", type(message).__name__))
                     return
 
                 if not message.channel.alternatives:
@@ -216,6 +227,18 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                 listen_task = asyncio.create_task(dg_connection.start_listening())
                 _LOGGER.debug("Deepgram connection started, listening task created")
 
+                # Keep the socket alive through audio pauses, e.g. while the
+                # pipeline is still waiting for speech (Deepgram NET-0001)
+                async def send_keepalives() -> None:
+                    while True:
+                        await asyncio.sleep(KEEPALIVE_INTERVAL)
+                        try:
+                            await dg_connection.send_control(ListenV1ControlMessage(type="KeepAlive"))
+                        except Exception:  # noqa: BLE001 - connection already closing
+                            return
+
+                keepalive_task = asyncio.create_task(send_keepalives())
+
                 # Stream audio data
                 try:
                     chunk_count = 0
@@ -248,11 +271,12 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                     _LOGGER.error("Error streaming audio: %s", e)
                     return SpeechResult("", SpeechResultState.ERROR)
                 finally:
-                    # Cancel listening task if still running
-                    if not listen_task.done():
-                        listen_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await listen_task
+                    # Cancel background tasks if still running
+                    for task in (keepalive_task, listen_task):
+                        if not task.done():
+                            task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await task
 
             # Return result (connection auto-closed by context manager)
             async with state_lock:
