@@ -355,21 +355,21 @@ class TestDeepgramSTTEventHandlers:
 
 
 class TestDeepgramSDKCompatibility:
-    """Test Deepgram SDK v5 API compatibility.
+    """Test Deepgram SDK v7 API compatibility.
 
     These tests ensure we're using the correct SDK methods and catch API
     breaking changes before deployment.
     """
 
-    def test_sdk_v5_imports_available(self):
-        """Test that required SDK v5 imports are available."""
+    def test_sdk_imports_available(self):
+        """Test that required SDK imports are available."""
         # Verify classes are importable (imported at module level)
         assert AsyncDeepgramClient is not None
         assert EventType is not None
 
     @pytest.mark.asyncio
     async def test_real_sdk_connection_api_compatibility(self):
-        """Integration test: verify real SDK has expected v5 API.
+        """Integration test: verify real SDK has expected v7 API.
 
         Verifies the connection object has the methods we expect,
         catching SDK breaking changes.
@@ -380,3 +380,75 @@ class TestDeepgramSDKCompatibility:
         # Verify listen.v1 exists
         assert hasattr(client, "listen")
         assert hasattr(client.listen, "v1")
+
+    def test_socket_client_has_control_methods(self):
+        """The socket client must provide the control helpers stt.py calls."""
+        from deepgram.listen.v1.socket_client import AsyncV1SocketClient  # noqa: PLC0415
+
+        for method in ("send_media", "send_keep_alive", "send_close_stream", "start_listening", "on"):
+            assert hasattr(AsyncV1SocketClient, method), method
+
+
+class TestTranscriptAssembly:
+    """Test how Deepgram's interim and final results become one transcript."""
+
+    @staticmethod
+    async def _transcribe(fake_deepgram, before_close=None, after_close=None):
+        fake_deepgram.script(before_close, after_close)
+        entry = MagicMock(
+            data={CONF_API_KEY: "test_api_key_12345", CONF_MODEL: DEFAULT_MODEL, CONF_LANGUAGE: "nl"},
+            options={},
+        )
+        entity = DeepgramSTTEntity(entry, AsyncDeepgramClient(api_key="test_api_key_12345"))
+        metadata = SpeechMetadata(
+            language="nl",
+            format=AudioFormats.WAV,
+            codec=AudioCodecs.PCM,
+            bit_rate=AudioBitRates.BITRATE_16,
+            sample_rate=AudioSampleRates.SAMPLERATE_16000,
+            channel=AudioChannels.CHANNEL_MONO,
+        )
+        return await entity.async_process_audio_stream(metadata, fake_deepgram.audio())
+
+    async def test_joins_all_final_segments(self, fake_deepgram):
+        """Every final segment is kept, including ones sent before CloseStream."""
+        msg = fake_deepgram.result
+        result = await self._transcribe(
+            fake_deepgram,
+            before_close=[msg("zet de", is_final=False), msg("zet de lamp", is_final=True)],
+            after_close=[msg("in de", is_final=False), msg("in de woonkamer aan", is_final=True)],
+        )
+        assert result.result == SpeechResultState.SUCCESS
+        assert result.text == "zet de lamp in de woonkamer aan"
+
+    async def test_keeps_trailing_interim_once(self, fake_deepgram):
+        """Unfinalized words use only the latest interim guess, not every guess."""
+        msg = fake_deepgram.result
+        result = await self._transcribe(
+            fake_deepgram,
+            after_close=[
+                msg("zet de lamp", is_final=True),
+                msg("aan", is_final=False),
+                msg("aan in", is_final=False),
+                msg("aan in de keuken", is_final=False),
+            ],
+        )
+        assert result.text == "zet de lamp aan in de keuken"
+
+    async def test_final_segment_replaces_interim(self, fake_deepgram):
+        """An interim guess is dropped once its words arrive as a final segment."""
+        msg = fake_deepgram.result
+        result = await self._transcribe(
+            fake_deepgram,
+            after_close=[
+                msg("zet de lamp", is_final=False),
+                msg("zet de lampen aan", is_final=True),
+                msg("", is_final=True),
+            ],
+        )
+        assert result.text == "zet de lampen aan"
+
+    async def test_only_silence_is_an_error(self, fake_deepgram):
+        """Empty final segments only (silence) give an error result."""
+        result = await self._transcribe(fake_deepgram, after_close=[fake_deepgram.result("", is_final=True)])
+        assert result.result == SpeechResultState.ERROR

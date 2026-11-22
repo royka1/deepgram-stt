@@ -10,6 +10,7 @@ Cloud-based speech-to-text integration for Home Assistant using the Deepgram API
 
 - **Multi-language support**: Polish, English, German, Spanish, French, Italian, Dutch, Portuguese
 - **Fast and accurate**: Powered by Deepgram's Nova-3 model
+- **Keyterm prompting**: Boosts recognition of your room, device and brand names
 - **Easy configuration**: Simple UI-based setup via Home Assistant config flow
 - **Voice assistant ready**: Works seamlessly with Home Assistant voice assistants
 
@@ -62,6 +63,21 @@ Get a free API key from [Deepgram Console](https://console.deepgram.com/):
 3. **Verify:**
    - Integration should appear in **Devices & Services**
    - Entity `stt.deepgram_stt` should be available in **Developer Tools** > **States**
+
+### Keyterm Prompting (optional)
+
+Nova-3 can be told which words to listen for, which helps with room, device and
+brand names that would otherwise be misheard. Open the integration in
+**Settings** > **Devices & Services** and click **Configure**:
+
+- **Keyterms**: Extra terms, one per line or comma-separated (for example
+  `Sonos`, `woonkamer lamp`). Multi-word terms are boosted as a phrase.
+- **Include area and exposed entity names** (on by default): Adds your area
+  names and the names and aliases of entities exposed to Assist.
+
+Changes apply to the next voice command; no restart needed. At most 100 terms
+are sent per request (your own terms first), and terms longer than 50
+characters are skipped. Keyterms are only sent for `nova-3` models.
 
 ## Using with Voice Assistants
 

@@ -1,0 +1,39 @@
+{
+  "title": "Deepgram STT",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Deepgram STT",
+        "description": "Enter your Deepgram API credentials",
+        "data": {
+          "api_key": "API Key",
+          "model": "Model",
+          "language": "Language"
+        }
+      }
+    },
+    "error": {
+      "invalid_api_key": "Invalid API key (must be at least 10 characters)",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Deepgram STT is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Keyterm prompting",
+        "description": "Words Deepgram should listen for, such as device, room and brand names. Only used with Nova-3 models.",
+        "data": {
+          "keyterms": "Keyterms",
+          "use_ha_names": "Include area and exposed entity names"
+        },
+        "data_description": {
+          "keyterms": "One per line or comma-separated. Multi-word terms are boosted as a phrase.",
+          "use_ha_names": "Automatically add area names and names of entities exposed to Assist, including aliases."
+        }
+      }
+    }
+  }
+}

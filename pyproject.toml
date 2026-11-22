@@ -52,6 +52,9 @@ filterwarnings = [
     # Treat warnings as errors to catch issues early
     "error",
     # Ignore specific warnings from third-party libraries as needed
+    # deepgram-sdk 7 imports deprecated websockets APIs (legacy client, InvalidStatusCode)
+    "ignore:websockets.exceptions.InvalidStatusCode is deprecated:DeprecationWarning",
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
     # "ignore:.*custom_components.* is using deprecated.*:DeprecationWarning",
 ]
 
